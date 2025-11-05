@@ -55,6 +55,8 @@
 
 (defvar url-http-end-of-headers)
 (defvar gptel-agent--agents)
+(defconst gptel-agent--hrule
+  (propertize "\n" 'face '(:inherit shadow :underline t :extend t)))
 
 ;;; System tools
 ;; "Execute Bash commands to inspect files and system state.
@@ -788,7 +790,7 @@ Exactly one item should have status \"in_progress\"."
                (todo-display
                 (concat
                  (unless (= (char-before (overlay-end todo-ov)) 10) "\n")
-                 (propertize "\n" 'face '(:inherit shadow :underline t :extend t))
+                 gptel-agent--hrule
                  (propertize "Task list: [ "
                              'face '(:inherit font-lock-comment-face :inherit bold))
                  (save-excursion
@@ -797,7 +799,7 @@ Exactly one item should have status \"in_progress\"."
                                'face 'help-key-binding))
                  (propertize " to toggle display ]\n" 'face 'font-lock-comment-face)
                  formatted-todos "\n"
-                 (propertize "\n" 'face '(:inherit shadow :underline t :extend t)))))
+                 gptel-agent--hrule)))
           (overlay-put todo-ov 'after-string todo-display)
           (when (and gptel-mode gptel-use-header-line in-progress header-line-format)
             (setf (nth 2 header-line-format)
@@ -814,7 +816,7 @@ Exactly one item should have status \"in_progress\"."
           ,#'gptel--handle-wait)
     (TOOL ,#'gptel-agent--indicate-tool-call
           ,#'gptel--handle-tool-use))
-  ";TODO: See `gptel-request--handlers'.")
+  "See `gptel-request--handlers'.")
 
 (defun gptel-agent--indicate-wait (fsm)
   (when-let* ((info (gptel-fsm-info fsm))
@@ -854,11 +856,11 @@ Exactly one item should have status \"in_progress\"."
                                      (plist-get call :name)
                                      (map-values (plist-get call :args))))
                                   tool-use)
-                       "\n" (propertize "\n" 'face '(:inherit shadow :underline t :extend t)))))
+                       "\n" gptel-agent--hrule)))
         (overlay-put ov 'count (+ info-count (length tool-use)))
         (overlay-put ov 'after-string new-info-msg)))))
 
-(defun gptel-agent--update-overlay (where &optional agent-type description)
+(defun gptel-agent--task-overlay (where &optional agent-type description)
   (let* ((bounds                  ;where to place the overlay, handle edge cases
           (save-excursion
             (goto-char where)
@@ -869,7 +871,7 @@ Exactly one item should have status \"in_progress\"."
          (ov (make-overlay (car bounds) (cdr bounds) nil t))
          (msg (concat
                (unless (eq (char-after (car bounds)) 10) "\n")
-               (propertize "\n" 'face '(:inherit shadow :underline t :extend t))
+               gptel-agent--hrule
                (propertize (concat (capitalize agent-type) " Task: ")
                            'face 'font-lock-escape-face)
                (propertize description 'face 'font-lock-doc-face) "\n")))
@@ -883,7 +885,7 @@ Exactly one item should have status \"in_progress\"."
        ov 'after-string
        (concat
         msg (propertize "Waiting..." 'face 'warning) "\n"
-        (propertize "\n" 'face '(:inherit shadow :underline t :extend t)))))))
+        gptel-agent--hrule)))))
 
 (defun gptel-agent--task (main-cb agent-type description prompt)
   "Call a gptel agent to do specific compound tasks.
@@ -904,7 +906,7 @@ PROMPT is the detailed prompt instructing the agent on what is required."
                             (capitalize agent-type) description)))
       (gptel--update-status " Calling Agent..." 'font-lock-escape-face)
       (gptel-request prompt
-        :context (gptel-agent--update-overlay where agent-type description)
+        :context (gptel-agent--task-overlay where agent-type description)
         :fsm (gptel-make-fsm :handlers gptel-agent-request--handlers)
         :callback
         (lambda (resp info)
