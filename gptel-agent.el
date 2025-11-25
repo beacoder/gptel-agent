@@ -137,7 +137,8 @@ any templates to the system prompt."
              (agents-list-str
               (cl-loop for entry in gptel-agent--agents
                        unless (or (string= (car entry) name)
-                                  (string= (car entry) "gptel-agent"))
+                                  (string= (car entry) "gptel-agent")
+                                  (string= (car entry) "gptel-plan"))
                        collect (format "`%s`: %s\n"
                                        (car entry) (plist-get (cdr entry) :description))
                        into agent-list
@@ -155,6 +156,8 @@ any templates to the system prompt."
   ;; Apply gptel-agent preset if it exists
   (when-let* ((gptel-agent-plist (assoc-default "gptel-agent" gptel-agent--agents nil nil)))
     (apply #'gptel-make-preset 'gptel-agent gptel-agent-plist))
+  (when-let* ((gptel-plan-plist (assoc-default "gptel-plan" gptel-agent--agents nil nil)))
+    (apply #'gptel-make-preset 'gptel-plan gptel-plan-plist))
   gptel-agent--agents)
 
 ;;; Sub-agent definition parsers for Markdown and Org
@@ -392,11 +395,27 @@ this session, which defaults to the default `gptel-agent'."
        (or agent-preset 'gptel-agent)
        (lambda (sym val) (set (make-local-variable sym) val)))
       (when gptel-use-header-line
-        (setcar header-line-format
-                '(:eval (concat
-                         (propertize " " 'display '(space :align-to 0))
-                         (format "%s" (gptel-backend-name gptel-backend))
-                         (propertize "[Agent]"))))))))
+        (let* ((agent-mode t)
+               (switch-mode
+                (lambda (&rest _)
+                  (gptel--apply-preset
+                   (if agent-mode 'gptel-plan 'gptel-agent)
+                   (lambda (sym val) (set (make-local-variable sym) val)))
+                  (setq agent-mode (not agent-mode))
+                  (force-mode-line-update)))
+               (display-mode
+                (lambda () (concat
+                       (propertize " " 'display '(space :align-to 0))
+                       (format "%s" (gptel-backend-name gptel-backend))
+                       (if agent-mode
+                           (propertize (buttonize "[Agent]" switch-mode nil
+                                                  "Switch to planning preset")
+                                       'face 'font-lock-keyword-face)
+                         (propertize (buttonize "[Plan]" switch-mode nil
+                                                "Switch to agent preset")
+                                     'face 'font-lock-doc-face))))))
+          (setcar header-line-format
+                  `(:eval (funcall ,display-mode))))))))
 
 (provide 'gptel-agent)
 
