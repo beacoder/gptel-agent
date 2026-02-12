@@ -940,15 +940,15 @@ Raises an error if PATTERN is empty, PATH is not readable, or the
       (unless (and (file-readable-p path) (file-directory-p path))
         (error "Error: path %s is not readable" path))
     (setq path "."))
-  (unless (or (executable-find "git") (executable-find "tree"))
-    (error "Error: Neither `git` nor `tree` not found.  This tool cannot be used"))
+  (unless (executable-find "tree")
+    (error "Error: Executable `tree` not found.  This tool cannot be used"))
   (let* ((full-path (expand-file-name path))
-         (is-git (and (executable-find "git")
-                      (zerop (call-process "git" nil nil nil "-C" full-path "rev-parse" "--is-inside-work-tree")))))
+         (git-root
+          (and (executable-find "git") (locate-dominating-file full-path ".git"))))
     (with-temp-buffer
-      (if is-git
+      (if git-root
           ;; --- Git Strategy ---
-          (let* ((default-directory full-path)
+          (let* ((default-directory git-root)
                  (exit-code
                   (apply #'call-process "git" nil t nil
                          "ls-files" "-z"
