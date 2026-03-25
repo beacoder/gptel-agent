@@ -48,9 +48,11 @@
 (eval-when-compile (require 'cl-lib))
 
 (declare-function org-escape-code-in-region "org-src")
+(declare-function gptel-agent-read-file "gptel-agent")
 
 (defvar url-http-end-of-headers)
 (defvar gptel-agent--agents)
+(defvar gptel-agent--skills)
 (defconst gptel-agent--hrule
   (propertize "\n" 'face '(:inherit shadow :underline t :extend t)))
 
@@ -380,6 +382,8 @@ COUNT is the number of results to return (default 5)."
   "Parse YouTube caption XML-STRING and return DOM."
   (with-temp-buffer
     (insert xml-string)
+    (set-buffer-multibyte t)
+    (decode-coding-region (point-min) (point-max) 'utf-8)
     (goto-char (point-min))
     ;; Clean up the XML
     (dolist (reps '(("\n" . " ")
@@ -596,8 +600,8 @@ diagnostics."
             (goto-char from)
             (when (looking-at "^ *```\\(diff\\|patch\\)\\s-*\n")
               (delete-region (match-beginning 0) (match-end 0))))
-          (skip-chars-backward " \t\r\n") (forward-line 0)
-          (when (looking-at-p "^ *```\\s-*\\'")
+          (skip-chars-backward " \t\r\n")
+          (when (looking-back "^ *```\\s-*\\'" (line-beginning-position))
             (delete-region (line-beginning-position) (line-end-position)))
           (setq description "Patch")
           (require 'diff-mode)
@@ -665,7 +669,7 @@ diagnostics."
 (defun gptel-agent--make-directory (parent name)
   "Create a directory NAME in PARENT directory.
 
-Creates the directory and any missing parent directories. If the
+Creates the directory and any missing parent directories.  If the
 directory already exists, this is a no-op and returns success.
 
 PARENT is the parent directory path,NAME is the name of the new
@@ -904,8 +908,8 @@ ARG-VALUES is the list of arguments for the tool call."
 (defun gptel-agent--write-file (path filename content)
   "Write CONTENT to FILENAME in PATH.
 
-PATH and FILENAME are expanded to create the full path. CONTENT is
-written to the file. Returns a success message string, or signals an
+PATH and FILENAME are expanded to create the full path.  CONTENT is
+written to the file.  Returns a success message string, or signals an
 error if writing fails.
 
 PATH, FILENAME, and CONTENT must all be strings."
@@ -920,6 +924,45 @@ PATH, FILENAME, and CONTENT must all be strings."
       (error "Error: Could not write file %s:\n%S" path errdata))))
 
 ;;;; Find files using regexes
+(defun gptel-agent--truncate-buffer (prefix &optional max-lines)
+  "Truncate the current buffer if it exceeds 20000 chars.
+
+Save the full content to a temporary file and replace the buffer
+with a truncated preview when the size limit is exceeded.
+
+PREFIX is a string identifier for the temporary file name.
+MAX-LINES is the number of lines to keep, defaulting to 50."
+  ;; Too large - save to temp file and return truncated info
+  (when (> (buffer-size) 20000)
+    (let* ((max-lines (or max-lines 50))
+           (temp-dir (expand-file-name "gptel-agent-temp"
+                                       (temporary-file-directory)))
+           (temp-file (expand-file-name
+                       (format "%s-%s-%s.txt"
+                               prefix
+                               (format-time-string "%Y%m%d-%H%M%S")
+                               (random 10000))
+                       temp-dir))
+           (orig-size (buffer-size))
+           (orig-lines (line-number-at-pos (point-max))))
+      ;; Create temp directory if needed
+      (unless (file-directory-p temp-dir)
+        (make-directory temp-dir t))
+      ;; Save full content
+      (write-region nil nil temp-file)
+      ;; Insert truncated header
+      (goto-char (point-min))
+      (insert (format "%s results too large (%d chars, %d lines) \
+ for context window.\nStored in: %s\n\nFirst %d lines:\n\n"
+                      prefix orig-size orig-lines temp-file max-lines))
+      ;; Truncate to first max-lines lines
+      (forward-line max-lines)
+      (delete-region (point) (point-max))
+      ;; Add footer with read instruction
+      (goto-char (point-max))
+      (insert (format "\n\n[Use Read tool with file_path=\"%s\" to view full results]"
+                      temp-file)))))
+
 (defun gptel-agent--glob (pattern &optional path depth)
   "Find files matching PATTERN using `git ls-files' or `tree' command.
 
@@ -940,8 +983,8 @@ Raises an error if PATTERN is empty, PATH is not readable, or the
       (unless (and (file-readable-p path) (file-directory-p path))
         (error "Error: path %s is not readable" path))
     (setq path "."))
-  (unless (executable-find "tree")
-    (error "Error: Executable `tree` not found.  This tool cannot be used"))
+  (unless (or (executable-find "tree") (executable-find "git"))
+    (error "Error: tree/git not available.  This tool cannot be used"))
   (let* ((full-path (expand-file-name path))
          (git-root
           (and (executable-find "git") (locate-dominating-file full-path ".git"))))
@@ -984,32 +1027,7 @@ Raises an error if PATTERN is empty, PATH is not readable, or the
             (goto-char (point-min))
             (insert (format "Glob failed with exit code %d\n.STDOUT:\n\n"
                             exit-code)))))
-      (when (> (buffer-size) 20000)
-        ;; Too large - save to temp file and return truncated info
-        (let* ((temp-dir (expand-file-name "gptel-agent-temp"
-                                           (temporary-file-directory)))
-               (temp-file (expand-file-name
-                           (format "glob-%s-%s.txt"
-                                   (format-time-string "%Y%m%d-%H%M%S")
-                                   (random 10000))
-                           temp-dir)))
-          (unless (file-directory-p temp-dir) (make-directory temp-dir t))
-          (write-region nil nil temp-file)
-          (let ((max-lines 50)
-                (orig-size (buffer-size))
-                (orig-lines (line-number-at-pos (point-max))))
-            ;; Insert header
-            (goto-char (point-min))
-            (insert (format "Glob results too large (%d chars, %d lines)\
- for context window.\nStored in: %s\n\nFirst %d lines:\n\n"
-                            orig-size orig-lines temp-file max-lines))
-            ;; Truncate to first max-lines lines
-            (forward-line max-lines)
-            (delete-region (point) (point-max))
-            ;; Insert footer
-            (goto-char (point-max))
-            (insert (format "\n\n[Use Read tool with file_path=\"%s\" to view full results]"
-                            temp-file)))))
+      (gptel-agent--truncate-buffer "glob")
       (buffer-string))))
 
 ;;;; Read files or directories
@@ -1208,12 +1226,54 @@ Exactly one item should have status \"in_progress\"."
                                       'face 'font-lock-escape-face))))))))
   t)
 
+;;; Skill tool
+(defun gptel-agent--get-skill (skill &optional _args)
+  "Return the details of the SKILL.
+
+This loads the body of the corresponding SKILL.  When using this as a
+tool in gptel, make sure the known skills are added to the context
+window.  `gptel-agent--skills-system-message' can be used to generate
+the known skills as string ready to be included to the context."
+  (let ((skill-dir
+         (car-safe
+          (alist-get skill gptel-agent--skills nil nil #'string-equal))))
+    (if (not skill-dir)
+        (format "Error: skill %s not found." skill)
+      (let* ((skill-dir-expanded (expand-file-name skill-dir))
+             (skill-files
+              (mapcar
+               (lambda (full-path)
+                 (cons (file-relative-name full-path skill-dir-expanded)
+                       full-path))
+               (directory-files-recursively skill-dir-expanded ".*")))
+             (body (plist-get
+                    (cdr (gptel-agent-read-file
+                          (expand-file-name "SKILL.md" skill-dir)))
+                    :system)))
+        (if body
+            (let (start)
+              (with-temp-buffer
+                (insert "## Skill: " skill
+                        "\n- base dir: " skill-dir-expanded "\n")
+                (setq start (point))
+                (insert body)
+                (pcase-dolist (`(,rel-path . ,full-path) skill-files)
+                  (unless (string-match-p "SKILL\\.md" rel-path)
+                    (goto-char start)
+                    (while (search-forward-regexp (regexp-quote rel-path) nil t)
+                      (replace-match full-path t t))))
+                (buffer-string)))
+          (format "Could not load body of skill %s" skill))))))
+
 ;;; Task tool (sub-agent)
 (defvar gptel-agent-request--handlers
   `((WAIT ,#'gptel-agent--indicate-wait
           ,#'gptel--handle-wait)
+    (TPRE ,#'gptel--handle-pre-tool ,#'gptel--fsm-transition)
     (TOOL ,#'gptel-agent--indicate-tool-call
-          ,#'gptel--handle-tool-use))
+          ,#'gptel--handle-tool-use)
+    (TRET ,#'gptel--handle-post-tool
+          ,#'gptel--handle-tool-result))
   "See `gptel-request--handlers'.")
 
 (defun gptel-agent--task-preview-setup (arg-values _info)
@@ -1316,7 +1376,7 @@ PROMPT is the detailed prompt instructing the agent on what is required."
   (gptel-with-preset
       (nconc (list :include-reasoning nil
                    :use-tools t
-                   :use-context nil)
+                   :context nil)        ;Can be overriden by agent
              (cdr (assoc agent-type gptel-agent--agents)))
     (let* ((info (gptel-fsm-info gptel--fsm-last))
            (where (or (plist-get info :tracking-marker)
@@ -1326,7 +1386,9 @@ PROMPT is the detailed prompt instructing the agent on what is required."
       (gptel--update-status " Calling Agent..." 'font-lock-escape-face)
       (gptel-request prompt
         :context (gptel-agent--task-overlay where agent-type description)
-        :fsm (gptel-make-fsm :handlers gptel-agent-request--handlers)
+        :fsm (gptel-make-fsm :table gptel-send--transitions
+                             :handlers gptel-agent-request--handlers)
+        :transforms (list #'gptel--transform-add-context)
         :callback
         (lambda (resp info)
           (let ((ov (plist-get info :context)))
@@ -1732,6 +1794,36 @@ Only one todo can be `in_progress` at a time."
         ( :type string :minLength 1
           :description "Present continuous form shown during execution (e.g., 'Running tests')")))))
  :category "gptel-agent")
+
+(gptel-make-tool
+ :name "Skill"
+ :description "Load a skill into the current conversation.
+
+Each skill provides guidance on how to execute a specific task.
+You can invoke a skill with optional args, the args are for your future reference only.
+
+When to use:
+- When a skill is relevant, you must invoke this tool IMMEDIATELY
+- This is a BLOCKING REQUIREMENT: invoke the relevant Skill tool before generating any other response about the task
+- Only use skills listed in your prompt
+- Do not invoke a skill that is already loaded.
+
+How to use:
+- Invoke with the skill name and optional args.  The args are for your reference only
+- Examples:
+    - `skill: \"pdf\"` - invoke the pdf skill
+    - `skill: \"commit\", args: \"-m 'Fix bug'\"` - invoke with arguments
+    - `skill: \"review-pr\", args: \"123\"` - invoke with arguments"
+ :function #'gptel-agent--get-skill
+ :args '(( :name "skill"
+           :type string
+           :description "Name of the skill, chosen from the list of available skills")
+         ( :name "args"
+           :type string
+           :optional t
+           :description "Args relevant to the skill, for your future reference"))
+ :category "gptel-agent"
+ :include t)
 
 (gptel-make-tool
  :name "Agent"
