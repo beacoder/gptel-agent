@@ -983,36 +983,36 @@ Raises an error if PATTERN is empty, PATH is not readable, or the
       (unless (and (file-readable-p path) (file-directory-p path))
         (error "Error: path %s is not readable" path))
     (setq path "."))
-  (unless (or (executable-find "tree") (executable-find "git"))
-    (error "Error: tree/git not available.  This tool cannot be used"))
   (let* ((full-path (expand-file-name path))
          (git-root
-          (and (executable-find "git") (locate-dominating-file full-path ".git"))))
+          (and (executable-find "git") (locate-dominating-file full-path ".git")))
+         (strategy (cond
+                    (git-root 'git)
+                    ((executable-find "tree") 'tree)
+                    (t (error "Error: tree/git not available.  This tool cannot be used")))))
     (with-temp-buffer
-      (if git-root
+      (if (eq strategy 'git)
           ;; --- Git Strategy ---
           (let* ((default-directory git-root)
                  (exit-code
                   (apply #'call-process "git" nil t nil
                          "ls-files" "-z"
                          "--full-name"
-                         "--cached"      ; Tracked files
-                         "--others"      ; Untracked files
-                         "--exclude-standard" ; Respect .gitignore
+                         "--cached"
+                         "--others"
+                         "--exclude-standard"
                          (list (concat "*" pattern "*")))))
             (if (/= exit-code 0)
                 (progn (goto-char (point-min))
                        (insert (format "Glob failed with exit code %d\n.STDOUT:\n\n"
                                        exit-code)))
-              ;; Convert null-terminated strings to newline-separated full paths
               (goto-char (point-min))
               (while (search-forward "\0" nil t)
                 (replace-match "\n"))
-              ;; Prepend the path to make them absolute
               (goto-char (point-min))
               (let ((path-prefix (file-name-as-directory full-path)))
                 (while (not (eobp))
-                  (unless (looking-at-p "^$") ; Skip empty lines
+                  (unless (looking-at-p "^$")
                     (insert path-prefix))
                   (forward-line 1)))))
         ;; --- Tree Strategy (Fallback) ---
