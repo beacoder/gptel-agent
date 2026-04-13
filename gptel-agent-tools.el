@@ -994,27 +994,58 @@ Raises an error if PATTERN is empty, PATH is not readable, or the
       (if (eq strategy 'git)
           ;; --- Git Strategy ---
           (let* ((default-directory git-root)
+                 (relative-path (file-relative-name full-path git-root))
+                 (pathspec (concat ":(icase)*" pattern "*"))
+                 (args (append (list "ls-files" "-z"
+                                     "--full-name"
+                                     "--cached"
+                                     "--others"
+                                     "--exclude-standard"
+                                     pathspec)
+                               (unless (string= relative-path ".")
+                                 (list relative-path))))
                  (exit-code
-                  (apply #'call-process "git" nil t nil
-                         "ls-files" "-z"
-                         "--full-name"
-                         "--cached"
-                         "--others"
-                         "--exclude-standard"
-                         (list (concat "*" pattern "*")))))
+                  (apply #'call-process "git" nil t nil args)))
             (if (/= exit-code 0)
                 (progn (goto-char (point-min))
                        (insert (format "Glob failed with exit code %d\n.STDOUT:\n\n"
                                        exit-code)))
+              ;; Split NUL-separated output into lines
               (goto-char (point-min))
               (while (search-forward "\0" nil t)
                 (replace-match "\n"))
+              ;; Filter by depth if requested
+              (when (natnump depth)
+                (let ((base-depth (if (string= relative-path ".")
+                                      0
+                                    (1+ (cl-count ?/ relative-path)))))
+                  (goto-char (point-min))
+                  (while (not (eobp))
+                    (if (and (not (looking-at-p "^$"))
+                             (> (cl-count ?/ (buffer-substring
+                                             (line-beginning-position)
+                                             (line-end-position)))
+                                (+ base-depth depth)))
+                        (delete-region (line-beginning-position)
+                                       (min (1+ (line-end-position)) (point-max)))
+                      (forward-line 1)))))
+              ;; Prepend full path prefix
               (goto-char (point-min))
-              (let ((path-prefix (file-name-as-directory full-path)))
+              (let ((path-prefix (file-name-as-directory git-root)))
                 (while (not (eobp))
                   (unless (looking-at-p "^$")
                     (insert path-prefix))
-                  (forward-line 1)))))
+                  (forward-line 1)))
+              ;; Sort by mtime
+              (let ((files (split-string (buffer-string) "\n" t)))
+                (setq files
+                      (sort files
+                            (lambda (a b)
+                              (time-less-p
+                               (file-attribute-modification-time (file-attributes b))
+                               (file-attribute-modification-time (file-attributes a))))))
+                (erase-buffer)
+                (insert (mapconcat #'identity files "\n")))))
         ;; --- Tree Strategy (Fallback) ---
         (let* ((args (list "-l" "-f" "-i" "-I" ".git"
                            "--sort=mtime" "--ignore-case"
