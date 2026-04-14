@@ -995,15 +995,15 @@ Raises an error if PATTERN is empty, PATH is not readable, or the
           ;; --- Git Strategy ---
           (let* ((default-directory git-root)
                  (relative-path (file-relative-name full-path git-root))
-                 (pathspec (concat ":(icase)*" pattern "*"))
-                 (args (append (list "ls-files" "-z"
-                                     "--full-name"
-                                     "--cached"
-                                     "--others"
-                                     "--exclude-standard"
-                                     pathspec)
-                               (unless (string= relative-path ".")
-                                 (list relative-path))))
+                 (pathspec (if (string= relative-path ".")
+                               (concat ":(icase)*" pattern "*")
+                             (concat ":(icase)" relative-path "/*" pattern "*")))
+                 (args (list "ls-files" "-z"
+                             "--full-name"
+                             "--cached"
+                             "--others"
+                             "--exclude-standard"
+                             pathspec))
                  (exit-code
                   (apply #'call-process "git" nil t nil args)))
             (if (/= exit-code 0)
