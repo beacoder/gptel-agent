@@ -993,7 +993,7 @@ MAX-LINES is the number of lines to keep, defaulting to 50."
                       temp-file)))))
 
 (defun gptel-agent--glob (pattern &optional path depth)
-  "Find files matching PATTERN using the `tree' command.
+  "Find files matching PATTERN using `git ls-files' or `tree' command.
 
 PATTERN is a case-insensitive regex pattern to match filenames against.
 PATH is the optional directory to search (defaults to current directory).
@@ -1012,21 +1012,81 @@ Raises an error if PATTERN is empty, PATH is not readable, or the
       (unless (and (file-readable-p path) (file-directory-p path))
         (error "Error: path %s is not readable" path))
     (setq path "."))
-  (unless (executable-find "tree")
-    (error "Error: Executable `tree` not found.  This tool cannot be used"))
-  (let ((full-path (expand-file-name path)))
+  (let* ((full-path (expand-file-name path))
+         (git-root
+          (and (executable-find "git") (locate-dominating-file full-path ".git")))
+         (strategy (cond
+                    (git-root 'git)
+                    ((executable-find "tree") 'tree)
+                    (t (error "Error: tree/git not available.  This tool cannot be used")))))
     (with-temp-buffer
-      (let* ((args (list "-l" "-f" "-i" "-I" ".git"
-                         "--sort=mtime" "--ignore-case"
-                         "--prune" "-P" pattern full-path))
-             (args (if (natnump depth)
-                       (nconc args (list "-L" (number-to-string depth)))
-                     args))
-             (exit-code (apply #'call-process "tree" nil t nil args)))
-        (when (/= exit-code 0)
-          (goto-char (point-min))
-          (insert (format "Glob failed with exit code %d\n.STDOUT:\n\n"
-                          exit-code))))
+      (if (eq strategy 'git)
+          ;; --- Git Strategy ---
+          (let* ((default-directory git-root)
+                 (relative-path (file-relative-name full-path git-root))
+                 (pathspec (if (string= relative-path ".")
+                               (concat ":(icase)*" pattern "*")
+                             (concat ":(icase)" relative-path "/*" pattern "*")))
+                 (args (list "ls-files" "-z"
+                             "--full-name"
+                             "--cached"
+                             "--others"
+                             "--exclude-standard"
+                             pathspec))
+                 (exit-code
+                  (apply #'call-process "git" nil t nil args)))
+            (if (/= exit-code 0)
+                (progn (goto-char (point-min))
+                       (insert (format "Glob failed with exit code %d\n.STDOUT:\n\n"
+                                       exit-code)))
+              ;; Split NUL-separated output into lines
+              (goto-char (point-min))
+              (while (search-forward "\0" nil t)
+                (replace-match "\n"))
+              ;; Filter by depth if requested
+              (when (natnump depth)
+                (let ((base-depth (if (string= relative-path ".")
+                                      0
+                                    (1+ (cl-count ?/ relative-path)))))
+                  (goto-char (point-min))
+                  (while (not (eobp))
+                    (if (and (not (looking-at-p "^$"))
+                             (> (cl-count ?/ (buffer-substring
+                                             (line-beginning-position)
+                                             (line-end-position)))
+                                (+ base-depth depth)))
+                        (delete-region (line-beginning-position)
+                                       (min (1+ (line-end-position)) (point-max)))
+                      (forward-line 1)))))
+              ;; Prepend full path prefix
+              (goto-char (point-min))
+              (let ((path-prefix (file-name-as-directory git-root)))
+                (while (not (eobp))
+                  (unless (looking-at-p "^$")
+                    (insert path-prefix))
+                  (forward-line 1)))
+              ;; Sort by mtime
+              (let ((files (split-string (buffer-string) "\n" t)))
+                (setq files
+                      (sort files
+                            (lambda (a b)
+                              (time-less-p
+                               (file-attribute-modification-time (file-attributes b))
+                               (file-attribute-modification-time (file-attributes a))))))
+                (erase-buffer)
+                (insert (mapconcat #'identity files "\n")))))
+        ;; --- Tree Strategy (Fallback) ---
+        (let* ((args (list "-l" "-f" "-i" "-I" ".git"
+                           "--sort=mtime" "--ignore-case"
+                           "--prune" "-P" pattern full-path))
+               (args (if (natnump depth)
+                         (nconc args (list "-L" (number-to-string depth)))
+                       args))
+               (exit-code (apply #'call-process "tree" nil t nil args)))
+          (when (/= exit-code 0)
+            (goto-char (point-min))
+            (insert (format "Glob failed with exit code %d\n.STDOUT:\n\n"
+                            exit-code)))))
       (gptel-agent--truncate-buffer "glob")
       (buffer-string))))
 
